@@ -19,7 +19,7 @@ import (
 
 const uninstallID = apps.AppID("uninstalltest")
 
-func newUninstallApp(th *Helper) *goapp.App {
+func newUninstallApp(th *Helper, asUser bool) *goapp.App {
 	app := goapp.MakeAppOrPanic(
 		apps.Manifest{
 			AppID:       uninstallID,
@@ -77,8 +77,12 @@ func newUninstallApp(th *Helper) *goapp.App {
 					err := client.StoreOAuth2User("testing")
 					require.NoError(th, err)
 				}
-				// setUser(creq.AsBot())
-				setUser(creq.AsActingUser())
+
+				setUser(creq.AsBot())
+
+				if (asUser) {
+					setUser(creq.AsActingUser())
+				}
 			})
 			return apps.NewTextResponse("installed")
 		})
@@ -87,6 +91,15 @@ func newUninstallApp(th *Helper) *goapp.App {
 }
 
 func testUninstall(th *Helper) {
+	const (
+		POLLUTE_KEYS_STEP_ONE = 599
+		POLLUTE_KEYS_STEP_TWO = 1401
+		POLLUTE_TOTAL_COUNT = 2000
+		APP_TOTAL_KEYS = 7
+		SPECIAL_BOT_KEY_OTHER_COUNT = 1
+	)
+
+	asUser := true
 	info := apps.CallRequest{
 		Call: *apps.NewCall(builtin.PathDebugKVInfo).WithExpand(apps.Expand{ActingUser: apps.ExpandSummary}),
 	}
@@ -100,11 +113,11 @@ func testUninstall(th *Helper) {
 		})
 	}
 
-	pollute(599)
-	th.InstallAppWithCleanup(newUninstallApp(th))
-	pollute(1401)
+	pollute(POLLUTE_KEYS_STEP_ONE)
+	th.InstallAppWithCleanup(newUninstallApp(th, asUser))
+	pollute(POLLUTE_KEYS_STEP_ONE)
 
-	th.Run("check test app data", func(th *Helper) {
+	th.Run("check test app data as user", func(th *Helper) {
 		cresp := th.HappyAdminCall(builtin.AppID, info)
 		require.Equal(th, apps.CallResponseTypeOK, cresp.Type)
 		info := store.KVDebugInfo{}
@@ -112,12 +125,12 @@ func testUninstall(th *Helper) {
 		require.Len(th, info.Apps, 1)
 		info.Apps[uninstallID].AppKVCountByUserID = nil
 		require.EqualValues(th, store.KVDebugInfo{
-			Total:             2012,
-			AppsTotal:         7,
+			Total:             POLLUTE_KEYS_STEP_ONE + POLLUTE_KEYS_STEP_TWO + APP_TOTAL_KEYS,
+			AppsTotal:         APP_TOTAL_KEYS,
 			InstalledAppCount: 1,
 			ManifestCount:     1,
 			OAuth2StateCount:  0,
-			Other:             0, // debug clean before the test clears out the special bot key; was: 1
+			Other:             SPECIAL_BOT_KEY_OTHER_COUNT - 1, // debug clean before the test clears out the special bot key; was: 1
 			SubscriptionCount: 3,
 			Debug:             2000,
 			Apps: map[apps.AppID]*store.KVDebugAppInfo{
@@ -132,19 +145,64 @@ func testUninstall(th *Helper) {
 	})
 
 	th.UninstallApp(uninstallID)
-	th.Run("uninstall clears KV data", func(th *Helper) {
+	th.Run("uninstall clears KV data as user", func(th *Helper) {
 		cresp := th.HappyAdminCall(builtin.AppID, info)
 		require.Equal(th, apps.CallResponseTypeOK, cresp.Type)
 		info := store.KVDebugInfo{}
 		utils.Remarshal(&info, cresp.Data)
 		require.EqualValues(th, store.KVDebugInfo{
-			Total:         2001,
+			Total:         POLLUTE_TOTAL_COUNT + 1,
 			ManifestCount: 1,
-			Other:         0, // debug clean before the test clears out the special bot key; was: 1
-			Debug:         2000,
+			Other:         SPECIAL_BOT_KEY_OTHER_COUNT - 1, // debug clean before the test clears out the special bot key; was: 1
+			Debug:         POLLUTE_TOTAL_COUNT,
 			Apps:          map[apps.AppID]*store.KVDebugAppInfo{},
 		}, info)
 	})
 
-	// TODO: test bot account cleanup
+	// It's a bot
+	pollute(599)
+	th.InstallAppWithCleanup(newUninstallApp(th, !asUser))
+	pollute(1401)
+
+	th.Run("check test app data as bot", func(th *Helper) {
+		cresp := th.HappyAdminCall(builtin.AppID, info)
+		require.Equal(th, apps.CallResponseTypeOK, cresp.Type)
+		info := store.KVDebugInfo{}
+		utils.Remarshal(&info, cresp.Data)
+		require.Len(th, info.Apps, 1)
+		info.Apps[uninstallID].AppKVCountByUserID = nil
+		require.EqualValues(th, store.KVDebugInfo{
+			Total:             POLLUTE_KEYS_STEP_ONE + POLLUTE_KEYS_STEP_TWO + APP_TOTAL_KEYS,
+			AppsTotal:         APP_TOTAL_KEYS,
+			InstalledAppCount: 1,
+			ManifestCount:     1,
+			OAuth2StateCount:  0,
+			Other:             SPECIAL_BOT_KEY_OTHER_COUNT - 1, // debug clean before the test clears out the special bot key; was: 1
+			SubscriptionCount: 3,
+			Debug:             2000,
+			Apps: map[apps.AppID]*store.KVDebugAppInfo{
+				"uninstalltest": {
+					AppKVCount:            4,
+					AppKVCountByNamespace: map[string]int{"": 1, "p1": 2, "p2": 1},
+					TokenCount:            2,
+					UserCount:             1,
+				},
+			},
+		}, info)
+	})
+
+	th.UninstallApp(uninstallID)
+	th.Run("uninstall clears KV data as bot", func(th *Helper) {
+		cresp := th.HappyAdminCall(builtin.AppID, info)
+		require.Equal(th, apps.CallResponseTypeOK, cresp.Type)
+		info := store.KVDebugInfo{}
+		utils.Remarshal(&info, cresp.Data)
+		require.EqualValues(th, store.KVDebugInfo{
+			Total:         POLLUTE_TOTAL_COUNT + 1,
+			ManifestCount: 1,
+			Other:         SPECIAL_BOT_KEY_OTHER_COUNT - 1, // debug clean before the test clears out the special bot key; was: 1
+			Debug:         POLLUTE_TOTAL_COUNT,
+			Apps:          map[apps.AppID]*store.KVDebugAppInfo{},
+		}, info)
+	})
 }
